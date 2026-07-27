@@ -5,8 +5,14 @@ const apprt = @import("../../apprt.zig");
 const global = @import("../../global.zig");
 const CoreSurface = @import("../../Surface.zig");
 const App = @import("App.zig");
+const Mouse = @import("Mouse.zig");
+const Clipboard = @import("Clipboard.zig");
+const Ime = @import("Ime.zig");
 const win32 = @import("win32.zig");
 const WGL = @import("WGL.zig");
+
+const log = std.log.scoped(.apprt_windows);
+const Keyboard = @import("Keyboard.zig");
 
 core_surface: CoreSurface = undefined,
 core_initialized: bool = false,
@@ -17,6 +23,9 @@ wgl: ?WGL = null,
 size: apprt.SurfaceSize = .{ .width = 800, .height = 600 },
 content_scale: apprt.ContentScale = .{ .x = 1, .y = 1 },
 cursor_pos: apprt.CursorPos = .{ .x = 0, .y = 0 },
+mouse: Mouse = .{},
+keyboard: Keyboard = .{},
+ime: Ime = .{},
 
 pub fn create(app: *App) !*Surface {
     const self = try app.core_app.alloc.create(Surface);
@@ -100,21 +109,44 @@ pub fn getTitle(self: *const Surface) ?[:0]const u8 {
 }
 pub fn supportsClipboard(self: *const Surface, clipboard_type: apprt.Clipboard) bool {
     _ = self;
-    _ = clipboard_type;
-    return false;
+    return clipboard_type == .standard;
 }
 pub fn clipboardRequest(self: *Surface, clipboard_type: apprt.Clipboard, state: apprt.ClipboardRequest) !bool {
-    _ = self;
-    _ = clipboard_type;
-    _ = state;
-    return false;
+    if (clipboard_type != .standard) return false;
+
+    const alloc = self.app.core_app.alloc;
+    const text = Clipboard.read(alloc, self.hwnd) catch |err| switch (err) {
+        error.ClipboardEmpty, error.ClipboardFormatUnavailable => return false,
+        else => return err,
+    };
+    defer alloc.free(text);
+
+    self.core_surface.completeClipboardRequest(state, text, false) catch |err| switch (err) {
+        // The native Windows runtime does not have confirmation UI yet. Never
+        // bypass CoreSurface's paste/read protections in its absence.
+        error.UnsafePaste, error.UnauthorizedPaste => {
+            log.warn("clipboard request requires confirmation; denying request", .{});
+            return true;
+        },
+        else => return err,
+    };
+    return true;
 }
 pub fn setClipboard(self: *Surface, clipboard_type: apprt.Clipboard, contents: []const apprt.ClipboardContent, confirm: bool) !void {
-    _ = self;
-    _ = clipboard_type;
-    _ = contents;
-    _ = confirm;
-    return error.Unsupported;
+    if (clipboard_type != .standard) return error.Unsupported;
+
+    // Until Windows has confirmation UI, a confirmation-required write must
+    // be denied rather than silently granting an OSC 52 clipboard write.
+    if (confirm) {
+        log.warn("clipboard write requires confirmation; denying request", .{});
+        return;
+    }
+
+    const text = for (contents) |content| {
+        if (std.mem.eql(u8, content.mime, "text/plain")) break content.data;
+    } else return error.Unsupported;
+
+    try Clipboard.write(self.app.core_app.alloc, self.hwnd, text);
 }
 pub fn defaultTermioEnv(self: *const Surface) !std.process.Environ.Map {
     _ = self;

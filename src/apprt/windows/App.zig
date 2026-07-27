@@ -19,6 +19,10 @@ config: Config,
 thread_id: u32,
 instance: win32.HINSTANCE,
 window_count: usize = 0,
+/// Set by the window procedure while dispatching a key message. Key
+/// messages are dispatched before translation so Core can prevent the
+/// complete WM_CHAR/WM_DEADCHAR sequence for a consumed shortcut.
+translate_key_message: bool = true,
 
 pub fn init(self: *App, core_app: *CoreApp, opts: struct {}) !void {
     _ = opts;
@@ -67,8 +71,19 @@ pub fn run(self: *App) !void {
             try self.core_app.tick(self);
             continue;
         }
-        _ = win32.TranslateMessage(&message);
-        _ = win32.DispatchMessageW(&message);
+        if (isKeyMessage(message.message)) {
+            // TranslateMessage posts zero or more character messages. Doing it
+            // after dispatch lets Core consume the physical key before any of
+            // those messages exist. This avoids stateful "drop the next char"
+            // logic, which cannot safely distinguish dead-key output,
+            // surrogate pairs, and a later unrelated character.
+            self.translate_key_message = true;
+            _ = win32.DispatchMessageW(&message);
+            if (self.translate_key_message) _ = win32.TranslateMessage(&message);
+        } else {
+            _ = win32.TranslateMessage(&message);
+            _ = win32.DispatchMessageW(&message);
+        }
     }
 }
 
@@ -118,6 +133,8 @@ fn windowProc(hwnd: win32.HWND, message: u32, w_param: win32.WPARAM, l_param: wi
         surface.?.hwnd = hwnd;
     }
     const self = surface orelse return win32.DefWindowProcW(hwnd, message, w_param, l_param);
+    if (self.mouse.handle(self, message, w_param, l_param)) |result| return result;
+    if (self.ime.handle(self, message, l_param)) |result| return result;
     switch (message) {
         win32.WM_CLOSE => {
             _ = win32.DestroyWindow(hwnd);
@@ -156,6 +173,35 @@ fn windowProc(hwnd: win32.HWND, message: u32, w_param: win32.WPARAM, l_param: wi
             _ = win32.SetWindowPos(hwnd, null, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, 0);
             return 0;
         },
+        win32.WM_SETFOCUS, win32.WM_KILLFOCUS => {
+            if (message == win32.WM_KILLFOCUS) {
+                self.mouse.cancel(self);
+                self.ime.reset(self);
+            }
+            self.keyboard.focus(self, message == win32.WM_SETFOCUS);
+            return 0;
+        },
+        win32.WM_KEYDOWN, win32.WM_KEYUP, win32.WM_SYSKEYDOWN, win32.WM_SYSKEYUP => {
+            if (self.keyboard.key(self, message, w_param, l_param)) {
+                self.app.translate_key_message = false;
+                return 0;
+            }
+            return win32.DefWindowProcW(hwnd, message, w_param, l_param);
+        },
+        win32.WM_CHAR => {
+            self.keyboard.char(self, @truncate(w_param));
+            return 0;
+        },
+        win32.WM_UNICHAR => {
+            if (w_param == win32.UNICODE_NOCHAR) return 1;
+            self.keyboard.char(self, @truncate(w_param));
+            return 0;
+        },
         else => return win32.DefWindowProcW(hwnd, message, w_param, l_param),
     }
+}
+
+fn isKeyMessage(message: u32) bool {
+    return message == win32.WM_KEYDOWN or message == win32.WM_KEYUP or
+        message == win32.WM_SYSKEYDOWN or message == win32.WM_SYSKEYUP;
 }
