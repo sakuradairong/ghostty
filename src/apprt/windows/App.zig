@@ -6,6 +6,8 @@ const apprt = @import("../../apprt.zig");
 const Config = @import("../../config.zig").Config;
 const CoreApp = @import("../../App.zig");
 const Surface = @import("Surface.zig");
+const ShellIntegration = @import("ShellIntegration.zig");
+const Dpi = @import("Dpi.zig");
 const win32 = @import("win32.zig");
 
 const wake_message: u32 = win32.WM_APP;
@@ -18,6 +20,7 @@ core_app: *CoreApp,
 config: Config,
 thread_id: u32,
 instance: win32.HINSTANCE,
+shell: ShellIntegration,
 window_count: usize = 0,
 /// Set by the window procedure while dispatching a key message. Key
 /// messages are dispatched before translation so Core can prevent the
@@ -29,7 +32,14 @@ pub fn init(self: *App, core_app: *CoreApp, opts: struct {}) !void {
     var config = try Config.load(core_app.alloc);
     errdefer config.deinit();
     const instance = win32.GetModuleHandleW(null) orelse return error.GetModuleHandleFailed;
-    self.* = .{ .core_app = core_app, .config = config, .thread_id = win32.GetCurrentThreadId(), .instance = instance };
+    self.* = .{
+        .core_app = core_app,
+        .config = config,
+        .thread_id = win32.GetCurrentThreadId(),
+        .instance = instance,
+        .shell = .init(),
+    };
+    errdefer self.shell.deinit();
 
     const class: win32.WNDCLASSEXW = .{
         .size = @sizeOf(win32.WNDCLASSEXW),
@@ -88,6 +98,7 @@ pub fn run(self: *App) !void {
 }
 
 pub fn terminate(self: *App) void {
+    self.shell.deinit();
     self.config.deinit();
 }
 pub fn wakeup(self: *App) void {
@@ -95,7 +106,6 @@ pub fn wakeup(self: *App) void {
 }
 
 pub fn performAction(self: *App, target: apprt.Target, comptime action: apprt.Action.Key, value: apprt.Action.Value(action)) !bool {
-    _ = value;
     switch (action) {
         .quit => {
             win32.PostQuitMessage(0);
@@ -113,6 +123,74 @@ pub fn performAction(self: *App, target: apprt.Target, comptime action: apprt.Ac
             _ = win32.InvalidateRect(core.rt_surface.hwnd, null, 0);
             return true;
         },
+        .initial_size => {
+            const core = switch (target) {
+                .surface => |surface| surface,
+                else => return false,
+            };
+            Dpi.resizeClient(core.rt_surface.hwnd, value.width, value.height, Dpi.forWindow(core.rt_surface.hwnd));
+            return true;
+        },
+        .size_limit => {
+            const core = switch (target) {
+                .surface => |surface| surface,
+                else => return false,
+            };
+            core.rt_surface.window.setSizeLimit(value);
+            return true;
+        },
+        .set_title => {
+            const core = switch (target) {
+                .surface => |surface| surface,
+                else => return false,
+            };
+            try core.rt_surface.window.setTitle(core.rt_surface.hwnd, value.title);
+            return true;
+        },
+        .toggle_maximize => {
+            const core = switch (target) {
+                .surface => |surface| surface,
+                else => return false,
+            };
+            core.rt_surface.window.toggleMaximize(core.rt_surface.hwnd);
+            return true;
+        },
+        .toggle_fullscreen => {
+            const core = switch (target) {
+                .surface => |surface| surface,
+                else => return false,
+            };
+            core.rt_surface.window.toggleFullscreen(core.rt_surface.hwnd);
+            return true;
+        },
+        .present_terminal => {
+            const core = switch (target) {
+                .surface => |surface| surface,
+                else => return false,
+            };
+            core.rt_surface.window.present(core.rt_surface.hwnd);
+            return true;
+        },
+        .ring_bell => {
+            const core = switch (target) {
+                .surface => |surface| surface,
+                else => return false,
+            };
+            if (self.config.@"bell-features".attention) {
+                self.shell.requestAttention(core.rt_surface.hwnd);
+            }
+            return true;
+        },
+        .progress_report => {
+            const core = switch (target) {
+                .surface => |surface| surface,
+                else => return false,
+            };
+            return self.shell.setProgress(core.rt_surface.hwnd, value);
+        },
+        // Windows toast notifications require an installer-provided AUMID and
+        // activation registration. Do not claim this action until those exist.
+        .desktop_notification => return false,
         else => return false,
     }
 }
@@ -157,6 +235,15 @@ fn windowProc(hwnd: win32.HWND, message: u32, w_param: win32.WPARAM, l_param: wi
             if (self.core_initialized) self.core_surface.sizeCallback(self.size) catch {};
             return 0;
         },
+        win32.WM_GETMINMAXINFO => {
+            const info: *win32.MINMAXINFO = @ptrFromInt(@as(usize, @bitCast(l_param)));
+            self.window.applyMinMaxInfo(hwnd, info);
+            return 0;
+        },
+        win32.WM_ACTIVATE => {
+            self.active = win32.lowWord(w_param) != 0;
+            return 0;
+        },
         win32.WM_PAINT => {
             var paint: win32.PAINTSTRUCT = undefined;
             _ = win32.BeginPaint(hwnd, &paint);
@@ -166,14 +253,14 @@ fn windowProc(hwnd: win32.HWND, message: u32, w_param: win32.WPARAM, l_param: wi
         },
         win32.WM_DPICHANGED => {
             const dpi = win32.lowWord(w_param);
-            const scale: f32 = @as(f32, @floatFromInt(dpi)) / 96.0;
-            self.content_scale = .{ .x = scale, .y = scale };
+            self.content_scale = Dpi.contentScale(dpi);
             if (self.core_initialized) self.core_surface.contentScaleCallback(self.content_scale) catch {};
             const rect: *const win32.RECT = @ptrFromInt(@as(usize, @bitCast(l_param)));
-            _ = win32.SetWindowPos(hwnd, null, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, 0);
+            _ = win32.SetWindowPos(hwnd, null, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, win32.SWP_NOZORDER | win32.SWP_NOACTIVATE);
             return 0;
         },
         win32.WM_SETFOCUS, win32.WM_KILLFOCUS => {
+            self.focused = message == win32.WM_SETFOCUS;
             if (message == win32.WM_KILLFOCUS) {
                 self.mouse.cancel(self);
                 self.ime.reset(self);

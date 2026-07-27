@@ -8,6 +8,8 @@ const App = @import("App.zig");
 const Mouse = @import("Mouse.zig");
 const Clipboard = @import("Clipboard.zig");
 const Ime = @import("Ime.zig");
+const Window = @import("Window.zig");
+const Dpi = @import("Dpi.zig");
 const win32 = @import("win32.zig");
 const WGL = @import("WGL.zig");
 
@@ -26,15 +28,21 @@ cursor_pos: apprt.CursorPos = .{ .x = 0, .y = 0 },
 mouse: Mouse = .{},
 keyboard: Keyboard = .{},
 ime: Ime = .{},
+window: Window,
+focused: bool = false,
+active: bool = false,
 
 pub fn create(app: *App) !*Surface {
     const self = try app.core_app.alloc.create(Surface);
     errdefer app.core_app.alloc.destroy(self);
-    self.* = .{ .app = app };
+    self.* = .{ .app = app, .window = try Window.init(app.core_app.alloc, "Ghostty") };
+    errdefer self.window.deinit();
     try app.createNativeWindow(self);
     errdefer {
         if (self.hwnd != null) _ = win32.DestroyWindow(self.hwnd);
     }
+
+    self.content_scale = Dpi.contentScale(Dpi.forWindow(self.hwnd));
 
     self.wgl = try WGL.init(@ptrCast(self.hwnd.?));
     errdefer {
@@ -73,6 +81,7 @@ pub fn deinit(self: *Surface) void {
         self.core_initialized = false;
     }
     if (self.wgl) |*wgl| wgl.deinit();
+    self.window.deinit();
     self.app.core_app.alloc.destroy(self);
 }
 
@@ -104,8 +113,7 @@ pub fn getCursorPos(self: *const Surface) !apprt.CursorPos {
     return self.cursor_pos;
 }
 pub fn getTitle(self: *const Surface) ?[:0]const u8 {
-    _ = self;
-    return null;
+    return self.window.getTitle();
 }
 pub fn supportsClipboard(self: *const Surface, clipboard_type: apprt.Clipboard) bool {
     _ = self;

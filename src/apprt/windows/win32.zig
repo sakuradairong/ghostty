@@ -8,10 +8,12 @@ pub const HBRUSH = ?*anyopaque;
 pub const HDC = ?*anyopaque;
 pub const HMENU = ?*anyopaque;
 pub const HIMC = ?*anyopaque;
+pub const HMONITOR = ?*anyopaque;
 pub const WPARAM = usize;
 pub const LPARAM = isize;
 pub const LRESULT = isize;
 pub const ATOM = u16;
+pub const BOOL = i32;
 
 pub const POINT = extern struct { x: i32, y: i32 };
 pub const MSG = extern struct {
@@ -46,11 +48,31 @@ pub const CREATESTRUCTW = extern struct {
     class: ?[*:0]const u16,
     ex_style: u32,
 };
+pub const MINMAXINFO = extern struct {
+    reserved: POINT,
+    max_size: POINT,
+    max_position: POINT,
+    min_track_size: POINT,
+    max_track_size: POINT,
+};
+pub const MONITORINFO = extern struct {
+    size: u32,
+    monitor: RECT = undefined,
+    work: RECT = undefined,
+    flags: u32 = 0,
+};
 pub const TRACKMOUSEEVENT = extern struct {
     size: u32,
     flags: u32,
     hwnd_track: HWND,
     hover_time: u32,
+};
+pub const FLASHWINFO = extern struct {
+    size: u32,
+    hwnd: HWND,
+    flags: u32,
+    count: u32,
+    timeout_ms: u32,
 };
 pub const COMPOSITIONFORM = extern struct {
     style: u32,
@@ -74,6 +96,7 @@ pub const WNDCLASSEXW = extern struct {
 };
 
 pub const WM_DESTROY: u32 = 0x0002;
+pub const WM_ACTIVATE: u32 = 0x0006;
 pub const WM_CANCELMODE: u32 = 0x001F;
 pub const WM_SETFOCUS: u32 = 0x0007;
 pub const WM_KILLFOCUS: u32 = 0x0008;
@@ -81,6 +104,7 @@ pub const WM_PAINT: u32 = 0x000F;
 pub const WM_SIZE: u32 = 0x0005;
 pub const WM_CLOSE: u32 = 0x0010;
 pub const WM_NCCREATE: u32 = 0x0081;
+pub const WM_GETMINMAXINFO: u32 = 0x0024;
 pub const WM_DPICHANGED: u32 = 0x02E0;
 pub const WM_MOUSEMOVE: u32 = 0x0200;
 pub const WM_LBUTTONDOWN: u32 = 0x0201;
@@ -110,14 +134,27 @@ pub const GCS_RESULTSTR: u32 = 0x0800;
 pub const CFS_POINT: u32 = 0x0002;
 pub const WM_APP: u32 = 0x8000;
 pub const GWLP_USERDATA: i32 = -21;
+pub const GWL_STYLE: i32 = -16;
+pub const GWL_EXSTYLE: i32 = -20;
 pub const CS_OWNDC: u32 = 0x0020;
 pub const CS_HREDRAW: u32 = 0x0002;
 pub const CS_VREDRAW: u32 = 0x0001;
 pub const WS_OVERLAPPEDWINDOW: u32 = 0x00CF0000;
 pub const CW_USEDEFAULT: i32 = @bitCast(@as(u32, 0x80000000));
 pub const SW_SHOW: i32 = 5;
+pub const SW_MINIMIZE: i32 = 6;
+pub const SW_MAXIMIZE: i32 = 3;
+pub const SW_RESTORE: i32 = 9;
+pub const SWP_FRAMECHANGED: u32 = 0x0020;
+pub const HWND_TOP: HWND = @ptrFromInt(0);
+pub const SWP_NOMOVE: u32 = 0x0002;
+pub const SWP_NOZORDER: u32 = 0x0004;
+pub const SWP_NOACTIVATE: u32 = 0x0010;
+pub const MONITOR_DEFAULTTONEAREST: u32 = 0x00000002;
 pub const IDC_ARROW: [*:0]const u16 = @ptrFromInt(32512);
 pub const TME_LEAVE: u32 = 0x00000002;
+pub const FLASHW_ALL: u32 = 0x00000003;
+pub const FLASHW_TIMERNOFG: u32 = 0x0000000C;
 pub const XBUTTON1: u16 = 0x0001;
 pub const WHEEL_DELTA: i32 = 120;
 pub const VK_CAPITAL: i32 = 0x14;
@@ -148,6 +185,14 @@ pub extern "user32" fn InvalidateRect(HWND, ?*const RECT, i32) callconv(.winapi)
 pub extern "user32" fn BeginPaint(HWND, *PAINTSTRUCT) callconv(.winapi) HDC;
 pub extern "user32" fn EndPaint(HWND, *const PAINTSTRUCT) callconv(.winapi) i32;
 pub extern "user32" fn SetWindowPos(HWND, HWND, i32, i32, i32, i32, u32) callconv(.winapi) i32;
+pub extern "user32" fn SetWindowTextW(HWND, [*:0]const u16) callconv(.winapi) i32;
+pub extern "user32" fn AdjustWindowRectExForDpi(*RECT, u32, i32, u32, u32) callconv(.winapi) i32;
+pub extern "user32" fn IsZoomed(HWND) callconv(.winapi) i32;
+pub extern "user32" fn IsIconic(HWND) callconv(.winapi) i32;
+pub extern "user32" fn SetForegroundWindow(HWND) callconv(.winapi) i32;
+pub extern "user32" fn GetWindowRect(HWND, *RECT) callconv(.winapi) i32;
+pub extern "user32" fn MonitorFromWindow(HWND, u32) callconv(.winapi) HMONITOR;
+pub extern "user32" fn GetMonitorInfoW(HMONITOR, *MONITORINFO) callconv(.winapi) i32;
 pub extern "user32" fn LoadCursorW(HINSTANCE, [*:0]const u16) callconv(.winapi) HCURSOR;
 pub extern "user32" fn GetDpiForWindow(HWND) callconv(.winapi) u32;
 pub extern "user32" fn TrackMouseEvent(*TRACKMOUSEEVENT) callconv(.winapi) i32;
@@ -157,6 +202,8 @@ pub extern "user32" fn ReleaseCapture() callconv(.winapi) i32;
 pub extern "user32" fn ScreenToClient(HWND, *POINT) callconv(.winapi) i32;
 pub extern "user32" fn GetKeyState(i32) callconv(.winapi) i16;
 pub extern "user32" fn MapVirtualKeyW(u32, u32) callconv(.winapi) u32;
+pub extern "user32" fn FlashWindowEx(*FLASHWINFO) callconv(.winapi) i32;
+pub extern "user32" fn GetForegroundWindow() callconv(.winapi) HWND;
 pub extern "kernel32" fn GetCurrentThreadId() callconv(.winapi) u32;
 pub extern "kernel32" fn GetModuleHandleW(?[*:0]const u16) callconv(.winapi) HINSTANCE;
 pub extern "imm32" fn ImmGetContext(HWND) callconv(.winapi) HIMC;
