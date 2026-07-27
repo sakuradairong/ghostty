@@ -1481,6 +1481,7 @@ jobs:
   test-windows:
     if: github.repository == 'ghostty-org/ghostty' && needs.skip.outputs.skip != 'true'
     needs: skip
+    name: Windows native app
     runs-on: namespace-profile-ghostty-windows
     timeout-minutes: 45
     steps:
@@ -1490,8 +1491,88 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
 
-      - name: Test
-        run: zig build -Dapp-runtime=none test
+      # Keep this focused on tests which do not require a terminal or desktop.
+      # The full platform-independent suite runs in the main test job.
+      - name: Run targeted Windows tests
+        shell: pwsh
+        run: |
+          zig build test -Dtarget=x86_64-windows-msvc -Dapp-runtime=none `
+            '-Dtest-filter=default runtime'
+          zig build test-lib-vt -Dtarget=x86_64-windows-msvc `
+            '-Dtest-filter=PageList Pin row movement clamps across mixed-width pages'
+
+      - name: Build native app
+        shell: pwsh
+        run: zig build -Dtarget=x86_64-windows-msvc -Doptimize=ReleaseSafe
+
+      - name: Smoke test native app
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $logDir = Join-Path $env:GITHUB_WORKSPACE 'windows-smoke-logs'
+          New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+
+          $exe = Join-Path $env:GITHUB_WORKSPACE 'zig-out\bin\ghostty.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+            throw "Native executable was not produced at $exe"
+          }
+
+          $stdout = Join-Path $logDir 'stdout.log'
+          $stderr = Join-Path $logDir 'stderr.log'
+          $process = $null
+          try {
+            $process = Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe) `
+              -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+            "pid=$($process.Id)" | Set-Content (Join-Path $logDir 'process.txt')
+
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            $windowSeen = $false
+            do {
+              Start-Sleep -Milliseconds 500
+              $process.Refresh()
+              if ($process.HasExited) {
+                throw "ghostty.exe exited before the smoke interval (exit code $($process.ExitCode))"
+              }
+              $windowSeen = $process.MainWindowHandle -ne 0
+            } while (-not $windowSeen -and [DateTime]::UtcNow -lt $deadline)
+
+            "window_seen=$windowSeen" | Add-Content (Join-Path $logDir 'process.txt')
+            if (-not $windowSeen) {
+              throw 'ghostty.exe stayed alive but did not create a top-level window within 30 seconds'
+            }
+          }
+          finally {
+            if ($null -ne $process -and -not $process.HasExited) {
+              $null = $process.CloseMainWindow()
+              if (-not $process.WaitForExit(5000)) {
+                Stop-Process -Id $process.Id -Force
+                $process.WaitForExit()
+              }
+            }
+            Get-Process | Where-Object ProcessName -Like 'ghostty*' |
+              Format-List * | Out-File (Join-Path $logDir 'remaining-processes.txt')
+          }
+
+      - name: Package portable archive
+        shell: pwsh
+        run: |
+          ./dist/windows/package.ps1 -Architecture x86_64
+          $archive = @(Get-ChildItem zig-out/dist/ghostty-*-windows-x86_64.zip)
+          if ($archive.Count -ne 1 -or $archive[0].Length -eq 0) {
+            throw 'Expected exactly one non-empty portable Windows archive'
+          }
+
+      - name: Upload native app and smoke logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ghostty-windows-x86_64-msvc
+          if-no-files-found: warn
+          path: |
+            zig-out/bin/ghostty.exe
+            zig-out/share/**
+            zig-out/dist/*.zip
+            windows-smoke-logs/**
 
   test-i18n:
     strategy:

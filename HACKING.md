@@ -26,6 +26,9 @@ When you're developing Ghostty, it's very likely that you will want to build a
 _debug_ build to diagnose issues more easily. This is already the default for
 Zig builds, so simply run `zig build` **without any `-Doptimize` flags**.
 
+Development of the experimental native Windows application has additional
+platform requirements and commands documented in [Native Windows Application](WINDOWS.md).
+
 There are many more build steps than just `zig build`, some of which are listed
 here:
 
