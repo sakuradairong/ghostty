@@ -5,112 +5,157 @@ const Allocator = std.mem.Allocator;
 const apprt = @import("../../apprt.zig");
 const Config = @import("../../config.zig").Config;
 const CoreApp = @import("../../App.zig");
+const Surface = @import("Surface.zig");
+const win32 = @import("win32.zig");
 
-const WM_APP: u32 = 0x8000;
-const wake_message: u32 = WM_APP;
+const wake_message: u32 = win32.WM_APP;
+const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GhosttyWindow");
+const window_title = std.unicode.utf8ToUtf16LeStringLiteral("Ghostty");
 
-/// WGL contexts are owned and used by the Win32 application thread.
 pub const must_draw_from_app_thread = true;
-
-const MSG = extern struct {
-    hwnd: ?*anyopaque,
-    message: u32,
-    w_param: usize,
-    l_param: isize,
-    time: u32,
-    point: extern struct { x: i32, y: i32 },
-    private: u32,
-};
-
-extern "user32" fn GetMessageW(
-    message: *MSG,
-    window: ?*anyopaque,
-    message_filter_min: u32,
-    message_filter_max: u32,
-) callconv(.winapi) i32;
-extern "user32" fn TranslateMessage(message: *const MSG) callconv(.winapi) i32;
-extern "user32" fn DispatchMessageW(message: *const MSG) callconv(.winapi) isize;
-extern "user32" fn PostQuitMessage(exit_code: i32) callconv(.winapi) void;
-extern "user32" fn PostThreadMessageW(
-    thread_id: u32,
-    message: u32,
-    w_param: usize,
-    l_param: isize,
-) callconv(.winapi) i32;
-extern "kernel32" fn GetCurrentThreadId() callconv(.winapi) u32;
 
 core_app: *CoreApp,
 config: Config,
 thread_id: u32,
+instance: win32.HINSTANCE,
+window_count: usize = 0,
 
 pub fn init(self: *App, core_app: *CoreApp, opts: struct {}) !void {
     _ = opts;
-
     var config = try Config.load(core_app.alloc);
     errdefer config.deinit();
+    const instance = win32.GetModuleHandleW(null) orelse return error.GetModuleHandleFailed;
+    self.* = .{ .core_app = core_app, .config = config, .thread_id = win32.GetCurrentThreadId(), .instance = instance };
 
-    self.* = .{
-        .core_app = core_app,
-        .config = config,
-        .thread_id = GetCurrentThreadId(),
+    const class: win32.WNDCLASSEXW = .{
+        .size = @sizeOf(win32.WNDCLASSEXW),
+        .style = win32.CS_OWNDC | win32.CS_HREDRAW | win32.CS_VREDRAW,
+        .wnd_proc = windowProc,
+        .cls_extra = 0,
+        .wnd_extra = 0,
+        .instance = instance,
+        .icon = null,
+        .cursor = win32.LoadCursorW(null, win32.IDC_ARROW),
+        .background = null,
+        .menu_name = null,
+        .class_name = class_name,
+        .icon_small = null,
     };
+    if (win32.RegisterClassExW(&class) == 0) return error.RegisterClassFailed;
+}
+
+pub fn createNativeWindow(self: *App, surface: *Surface) !void {
+    const hwnd = win32.CreateWindowExW(0, class_name, window_title, win32.WS_OVERLAPPEDWINDOW, win32.CW_USEDEFAULT, win32.CW_USEDEFAULT, 800, 600, null, null, self.instance, surface) orelse return error.CreateWindowFailed;
+    surface.hwnd = hwnd;
+    self.window_count += 1;
+}
+
+pub fn showNativeWindow(_: *App, surface: *Surface) void {
+    const hwnd = surface.hwnd orelse return;
+    _ = win32.ShowWindow(hwnd, win32.SW_SHOW);
+    _ = win32.UpdateWindow(hwnd);
 }
 
 pub fn run(self: *App) !void {
-    // M1 does not create a window yet. Queue a quit message so starting the
-    // native runtime cannot leave a permanently idle, windowless process.
-    PostQuitMessage(0);
-
-    var message: MSG = undefined;
+    _ = try Surface.create(self);
+    var message: win32.MSG = undefined;
     while (true) {
-        const result = GetMessageW(&message, null, 0, 0);
+        const result = win32.GetMessageW(&message, null, 0, 0);
         if (result == 0) break;
         if (result == -1) return error.GetMessageFailed;
-
         if (message.message == wake_message) {
             try self.core_app.tick(self);
             continue;
         }
-
-        _ = TranslateMessage(&message);
-        _ = DispatchMessageW(&message);
+        _ = win32.TranslateMessage(&message);
+        _ = win32.DispatchMessageW(&message);
     }
 }
 
 pub fn terminate(self: *App) void {
     self.config.deinit();
 }
-
 pub fn wakeup(self: *App) void {
-    _ = PostThreadMessageW(self.thread_id, wake_message, 0, 0);
+    _ = win32.PostThreadMessageW(self.thread_id, wake_message, 0, 0);
 }
 
-pub fn performAction(
-    self: *App,
-    target: apprt.Target,
-    comptime action: apprt.Action.Key,
-    value: apprt.Action.Value(action),
-) !bool {
-    _ = self;
-    _ = target;
+pub fn performAction(self: *App, target: apprt.Target, comptime action: apprt.Action.Key, value: apprt.Action.Value(action)) !bool {
     _ = value;
-
-    if (action == .quit) {
-        PostQuitMessage(0);
-        return true;
+    switch (action) {
+        .quit => {
+            win32.PostQuitMessage(0);
+            return true;
+        },
+        .new_window => {
+            _ = try Surface.create(self);
+            return true;
+        },
+        .render => {
+            const core = switch (target) {
+                .surface => |surface| surface,
+                else => return false,
+            };
+            _ = win32.InvalidateRect(core.rt_surface.hwnd, null, 0);
+            return true;
+        },
+        else => return false,
     }
-
-    return false;
 }
 
-pub fn performIpc(
-    alloc: Allocator,
-    target: apprt.ipc.Target,
-    comptime action: apprt.ipc.Action.Key,
-    value: apprt.ipc.Action.Value(action),
-) !bool {
+pub fn performIpc(alloc: Allocator, target: apprt.ipc.Target, comptime action: apprt.ipc.Action.Key, value: apprt.ipc.Action.Value(action)) !bool {
     _ = alloc;
     _ = target;
     _ = value;
     return false;
+}
+
+fn windowProc(hwnd: win32.HWND, message: u32, w_param: win32.WPARAM, l_param: win32.LPARAM) callconv(.winapi) win32.LRESULT {
+    var surface: ?*Surface = if (win32.GetWindowLongPtrW(hwnd, win32.GWLP_USERDATA) == 0) null else @ptrFromInt(@as(usize, @bitCast(win32.GetWindowLongPtrW(hwnd, win32.GWLP_USERDATA))));
+    if (message == win32.WM_NCCREATE) {
+        const create: *const win32.CREATESTRUCTW = @ptrFromInt(@as(usize, @bitCast(l_param)));
+        surface = @ptrCast(@alignCast(create.create_params.?));
+        _ = win32.SetWindowLongPtrW(hwnd, win32.GWLP_USERDATA, @bitCast(@intFromPtr(surface.?)));
+        surface.?.hwnd = hwnd;
+    }
+    const self = surface orelse return win32.DefWindowProcW(hwnd, message, w_param, l_param);
+    switch (message) {
+        win32.WM_CLOSE => {
+            _ = win32.DestroyWindow(hwnd);
+            return 0;
+        },
+        win32.WM_DESTROY => {
+            _ = win32.SetWindowLongPtrW(hwnd, win32.GWLP_USERDATA, 0);
+            self.hwnd = null;
+            const app = self.app;
+            app.window_count -= 1;
+            // During Surface.create failure handling the allocator still owns
+            // the object. A fully initialized surface is window-owned.
+            if (self.core_initialized) self.deinit();
+            if (app.window_count == 0) win32.PostQuitMessage(0);
+            return 0;
+        },
+        win32.WM_SIZE => {
+            const dimensions: usize = @bitCast(l_param);
+            self.size = .{ .width = win32.lowWord(dimensions), .height = win32.highWord(dimensions) };
+            if (self.core_initialized) self.core_surface.sizeCallback(self.size) catch {};
+            return 0;
+        },
+        win32.WM_PAINT => {
+            var paint: win32.PAINTSTRUCT = undefined;
+            _ = win32.BeginPaint(hwnd, &paint);
+            defer _ = win32.EndPaint(hwnd, &paint);
+            self.draw() catch {};
+            return 0;
+        },
+        win32.WM_DPICHANGED => {
+            const dpi = win32.lowWord(w_param);
+            const scale: f32 = @as(f32, @floatFromInt(dpi)) / 96.0;
+            self.content_scale = .{ .x = scale, .y = scale };
+            if (self.core_initialized) self.core_surface.contentScaleCallback(self.content_scale) catch {};
+            const rect: *const win32.RECT = @ptrFromInt(@as(usize, @bitCast(l_param)));
+            _ = win32.SetWindowPos(hwnd, null, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, 0);
+            return 0;
+        },
+        else => return win32.DefWindowProcW(hwnd, message, w_param, l_param),
+    }
 }
