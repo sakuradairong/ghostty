@@ -44,7 +44,10 @@ pub fn create(app: *App) !*Surface {
 
     self.content_scale = Dpi.contentScale(Dpi.forWindow(self.hwnd));
 
-    self.wgl = try WGL.init(@ptrCast(self.hwnd.?));
+    self.wgl = WGL.init(@ptrCast(self.hwnd.?)) catch |err| {
+        log.err("WGL initialization failed error={s}", .{@errorName(err)});
+        return err;
+    };
     errdefer {
         if (self.wgl) |*wgl| wgl.deinit();
     }
@@ -59,13 +62,16 @@ pub fn create(app: *App) !*Surface {
         self.registered = false;
     }
 
-    try self.core_surface.init(
+    self.core_surface.init(
         app.core_app.alloc,
         &config,
         app.core_app,
         app,
         self,
-    );
+    ) catch |err| {
+        log.err("Ghostty renderer initialization failed error={s}", .{@errorName(err)});
+        return err;
+    };
     self.core_initialized = true;
     app.showNativeWindow(self);
     return self;
@@ -77,6 +83,11 @@ pub fn deinit(self: *Surface) void {
         self.registered = false;
     }
     if (self.core_initialized) {
+        // Renderer teardown deletes OpenGL objects, so it must run against
+        // this surface's context rather than whichever window drew last.
+        if (self.wgl) |*wgl| wgl.makeCurrent() catch |err| {
+            log.err("failed to make WGL context current for renderer shutdown error={s}", .{@errorName(err)});
+        };
         self.core_surface.deinit();
         self.core_initialized = false;
     }

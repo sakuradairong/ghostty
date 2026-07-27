@@ -9,6 +9,9 @@ const Surface = @import("Surface.zig");
 const ShellIntegration = @import("ShellIntegration.zig");
 const Dpi = @import("Dpi.zig");
 const win32 = @import("win32.zig");
+const WGL = @import("WGL.zig");
+
+const log = std.log.scoped(.apprt_windows);
 
 const wake_message: u32 = win32.WM_APP;
 const class_name = std.unicode.utf8ToUtf16LeStringLiteral("GhosttyWindow");
@@ -71,7 +74,11 @@ pub fn showNativeWindow(_: *App, surface: *Surface) void {
 }
 
 pub fn run(self: *App) !void {
-    _ = try Surface.create(self);
+    _ = Surface.create(self) catch |err| {
+        log.err("initial Windows surface creation failed error={s}", .{@errorName(err)});
+        showStartupError(err);
+        return err;
+    };
     var message: win32.MSG = undefined;
     while (true) {
         const result = win32.GetMessageW(&message, null, 0, 0);
@@ -225,8 +232,10 @@ fn windowProc(hwnd: win32.HWND, message: u32, w_param: win32.WPARAM, l_param: wi
             app.window_count -= 1;
             // During Surface.create failure handling the allocator still owns
             // the object. A fully initialized surface is window-owned.
-            if (self.core_initialized) self.deinit();
-            if (app.window_count == 0) win32.PostQuitMessage(0);
+            if (self.core_initialized) {
+                self.deinit();
+                if (app.window_count == 0) win32.PostQuitMessage(0);
+            }
             return 0;
         },
         win32.WM_SIZE => {
@@ -248,7 +257,9 @@ fn windowProc(hwnd: win32.HWND, message: u32, w_param: win32.WPARAM, l_param: wi
             var paint: win32.PAINTSTRUCT = undefined;
             _ = win32.BeginPaint(hwnd, &paint);
             defer _ = win32.EndPaint(hwnd, &paint);
-            self.draw() catch {};
+            self.draw() catch |err| {
+                log.err("Windows surface draw failed error={s}", .{@errorName(err)});
+            };
             return 0;
         },
         win32.WM_DPICHANGED => {
@@ -286,6 +297,31 @@ fn windowProc(hwnd: win32.HWND, message: u32, w_param: win32.WPARAM, l_param: wi
         },
         else => return win32.DefWindowProcW(hwnd, message, w_param, l_param),
     }
+}
+
+fn showStartupError(err: anyerror) void {
+    const requirement = if (WGL.isInitError(err) or err == error.OpenGLOutdated)
+        "\n\nGhostty requires an OpenGL 4.3 Core Profile context."
+    else
+        "";
+    var utf8_buffer: [512]u8 = undefined;
+    const message = std.fmt.bufPrint(
+        &utf8_buffer,
+        "Ghostty failed to initialize its Windows surface.\n\n" ++
+            "Failure stage: {s}{s}",
+        .{ @errorName(err), requirement },
+    ) catch "Ghostty failed to initialize its Windows surface.";
+
+    var utf16_buffer: [512]u16 = undefined;
+    const len = std.unicode.utf8ToUtf16Le(utf16_buffer[0 .. utf16_buffer.len - 1], message) catch 0;
+    utf16_buffer[len] = 0;
+    const title = std.unicode.utf8ToUtf16LeStringLiteral("Ghostty startup error");
+    _ = win32.MessageBoxW(
+        null,
+        utf16_buffer[0..len :0].ptr,
+        title,
+        win32.MB_OK | win32.MB_ICONERROR | win32.MB_TASKMODAL,
+    );
 }
 
 fn isKeyMessage(message: u32) bool {
