@@ -43,6 +43,9 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
     switch (cfg.target.result.os.tag) {
         .windows => {
             exe.subsystem = .Windows;
+            if (cfg.target.result.abi == .msvc) {
+                exe.entry = .{ .symbol_name = "mainCRTStartup" };
+            }
             exe.root_module.linkSystemLibrary("ole32", .{});
             exe.root_module.linkSystemLibrary("shell32", .{});
             exe.root_module.addWin32ResourceFile(.{

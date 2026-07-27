@@ -236,6 +236,13 @@ pub const exp = struct {
             lpNumberOfBytesRead: ?*DWORD,
             lpOverlapped: ?*OVERLAPPED,
         ) callconv(.winapi) BOOL;
+        pub extern "kernel32" fn WriteFile(
+            hFile: HANDLE,
+            lpBuffer: ?*const anyopaque,
+            nNumberOfBytesToWrite: DWORD,
+            lpNumberOfBytesWritten: ?*DWORD,
+            lpOverlapped: ?*OVERLAPPED,
+        ) callconv(.winapi) BOOL;
     };
     pub const ntdll = struct {
         pub extern "ntdll" fn NtCreateFile(

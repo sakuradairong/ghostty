@@ -124,8 +124,8 @@ pub fn threadEnter(
     // Create our pipe that we'll use to kill our read thread.
     // pipe[0] is the read end, pipe[1] is the write end.
     const pipe = try internal_os.pipe();
-    errdefer _ = posix.system.close(pipe[0]);
-    errdefer _ = posix.system.close(pipe[1]);
+    errdefer closePipe(pipe[0]);
+    errdefer closePipe(pipe[1]);
 
     // Setup our stream so that we can write.
     var stream = xev.Stream.initFd(pty_fds.write);
@@ -204,18 +204,7 @@ pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
     // Quit our read thread after exiting the subprocess so that
     // we don't get stuck waiting for data to stop flowing if it is
     // a particularly noisy process.
-    switch (posix.errno(posix.system.write(exec.read_thread_pipe, "x", 1))) {
-        .SUCCESS => {},
-
-        // EPIPE means that our read thread is closed already, which is
-        // completely fine since that is what we were trying to achieve.
-        .PIPE => {},
-
-        else => |e| log.warn(
-            "error writing to read thread quit pipe err=E{s}",
-            .{@tagName(e)},
-        ),
-    }
+    signalReadThreadQuit(exec.read_thread_pipe);
 
     if (comptime builtin.os.tag == .windows) {
         // Interrupt the blocking read so the thread can see the quit message
@@ -228,6 +217,45 @@ pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
     }
 
     exec.read_thread.join();
+}
+
+fn closePipe(fd: posix.fd_t) void {
+    if (comptime builtin.os.tag == .windows) {
+        if (windows.exp.kernel32.CloseHandle(fd) == windows.FALSE) {
+            log.warn("error closing read thread quit pipe err={}", .{windows.GetLastError()});
+        }
+        return;
+    }
+
+    _ = posix.system.close(fd);
+}
+
+fn signalReadThreadQuit(fd: posix.fd_t) void {
+    if (comptime builtin.os.tag == .windows) {
+        var written: windows.DWORD = 0;
+        if (windows.exp.kernel32.WriteFile(fd, "x", 1, &written, null) == windows.FALSE) {
+            switch (windows.GetLastError()) {
+                .BROKEN_PIPE, .NO_DATA => {},
+                else => |err| log.warn("error writing to read thread quit pipe err={}", .{err}),
+            }
+        } else if (written != 1) {
+            log.warn("short write to read thread quit pipe bytes={}", .{written});
+        }
+        return;
+    }
+
+    switch (posix.errno(posix.system.write(fd, "x", 1))) {
+        .SUCCESS => {},
+
+        // EPIPE means that our read thread is closed already, which is
+        // completely fine since that is what we were trying to achieve.
+        .PIPE => {},
+
+        else => |e| log.warn(
+            "error writing to read thread quit pipe err=E{s}",
+            .{@tagName(e)},
+        ),
+    }
 }
 
 pub fn focusGained(
@@ -539,7 +567,7 @@ pub const ThreadData = struct {
     termios_mode: ptypkg.Mode = .{},
 
     pub fn deinit(self: *ThreadData, alloc: Allocator) void {
-        _ = posix.system.close(self.read_thread_pipe);
+        closePipe(self.read_thread_pipe);
 
         // Clear our write pools. We know we aren't ever going to do
         // any more IO since we stop our data stream below so we can just
@@ -1769,7 +1797,7 @@ pub const ReadThread = struct {
 
     fn threadMainWindows(fd: posix.fd_t, io: *termio.Termio, quit: posix.fd_t) void {
         // Always close our end of the pipe when we exit.
-        defer _ = posix.system.close(quit);
+        defer closePipe(quit);
 
         // Setup our crash metadata
         crash.sentry.thread_state = .{
