@@ -165,8 +165,10 @@ pub fn surfaceInit(surface: *apprt.Surface) !void {
     switch (apprt.runtime) {
         else => @compileError("unsupported app runtime for OpenGL"),
 
-        // GTK uses global OpenGL context so we load from null.
+        // GTK and Win32 use the platform OpenGL loader. The application
+        // runtime makes the surface context current before this is called.
         apprt.gtk,
+        apprt.windows,
         => try prepareContext(null),
 
         apprt.embedded => {
@@ -201,11 +203,10 @@ pub fn threadEnter(self: *const OpenGL, surface: *apprt.Surface) !void {
     switch (apprt.runtime) {
         else => @compileError("unsupported app runtime for OpenGL"),
 
-        apprt.gtk => {
-            // GTK doesn't support threaded OpenGL operations as far as I can
-            // tell, so we use the renderer thread to setup all the state
-            // but then do the actual draws and texture syncs and all that
-            // on the main thread. As such, we don't do anything here.
+        apprt.gtk, apprt.windows => {
+            // These runtimes keep their OpenGL contexts on the application
+            // thread. The renderer thread prepares state but does not issue
+            // OpenGL calls directly.
         },
 
         apprt.embedded => {
@@ -223,9 +224,9 @@ pub fn threadExit(self: *const OpenGL) void {
     switch (apprt.runtime) {
         else => @compileError("unsupported app runtime for OpenGL"),
 
-        apprt.gtk => {
-            // We don't need to do any unloading for GTK because we may
-            // be sharing the global bindings with other windows.
+        apprt.gtk, apprt.windows => {
+            // We don't unload here because bindings may be shared by other
+            // windows and are owned by the application thread.
         },
 
         apprt.embedded => {

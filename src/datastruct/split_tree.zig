@@ -1353,7 +1353,7 @@ pub fn SplitTree(comptime V: type) type {
                 },
             ),
 
-            .none => void,
+            .none, .windows => void,
         };
     };
 }

@@ -11,11 +11,15 @@ pub const Runtime = enum {
     /// approach to building the application.
     gtk,
 
+    /// Native Windows application runtime.
+    windows,
+
     pub fn default(target: std.Target) Runtime {
         return switch (target.os.tag) {
             // The Linux and FreeBSD default is GTK because it is a full
             // featured application.
             .linux, .freebsd => .gtk,
+            .windows => .windows,
             // Otherwise, we do NONE so we don't create an exe and we create
             // libghostty. On macOS, Xcode is used to build the app that links
             // to libghostty.
@@ -26,4 +30,17 @@ pub const Runtime = enum {
 
 test {
     _ = Runtime;
+}
+
+test "default runtime" {
+    var target = @import("builtin").target;
+
+    target.os.tag = .linux;
+    try std.testing.expectEqual(.gtk, Runtime.default(target));
+
+    target.os.tag = .windows;
+    try std.testing.expectEqual(.windows, Runtime.default(target));
+
+    target.os.tag = .macos;
+    try std.testing.expectEqual(.none, Runtime.default(target));
 }
