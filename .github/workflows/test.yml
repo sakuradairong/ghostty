@@ -1479,10 +1479,11 @@ jobs:
         run: nix develop -c zig build test --system ${{ steps.deps.outputs.deps }}
 
   test-windows:
-    if: github.repository == 'ghostty-org/ghostty' && needs.skip.outputs.skip != 'true'
-    needs: skip
+    # This job intentionally runs on forks too so Windows port branches can be
+    # validated before they are proposed upstream. It is independent of the
+    # upstream-only `skip` job above.
     name: Windows native app
-    runs-on: namespace-profile-ghostty-windows
+    runs-on: windows-2025
     timeout-minutes: 45
     steps:
       - name: Checkout code
